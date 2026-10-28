@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Школьная система — Реляционная БД</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 40px; background: #f4f7f6; }
+        .card { background: white; padding: 20px; margin-bottom: 20px; border-radius: 8px; box-shadow: 0 2px 4px rgba(0,0,0,0.1); }
+        input, select, button { padding: 8px; margin: 5px 0; width: 100%; box-sizing: border-box; }
+        button { background: #007bff; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+        button:hover { background: #0056b3; }
+        .btn-green { background: #28a745; }
+        .btn-green:hover { background: #218838; }
+        ul { padding-left: 20px; }
+        .error { color: red; font-weight: bold; }
+        .success { color: green; font-weight: bold; }
+        .hidden { display: none; }
+        .user-info { background: #e2f0d9; padding: 10px; border-radius: 4px; margin-bottom: 10px; }
+    </style>
+</head>
+<body>
+
+    <h1>📚 Реляционный школьный журнал</h1>
+
+    <!-- БЛОК АВТОРИЗАЦИИ И РЕГИСТРАЦИИ -->
+    <div id="authContainer" class="card">
+        <h2>Регистрация и Вход</h2>
+        
+        <h3>Регистрация</h3>
+        <input type="text" id="regUsername" placeholder="Логин">
+        <input type="password" id="regPassword" placeholder="Пароль">
+        <select id="regRole" onchange="toggleRegClass()">
+            <option value="teacher">Учитель (teacher)</option>
+            <option value="student">Ученик (student)</option>
+        </select>
+        
+        <!-- Выбор класса виден только для учеников -->
+        <select id="regClassId" class="hidden">
+            <option value="">Выберите класс...</option>
+        </select>
+        
+        <button onclick="register()">Зарегистрироваться</button>
+
+        <hr style="margin: 20px 0;">
+
+        <h3>Вход в систему</h3>
+        <input type="text" id="loginUsername" placeholder="Логин">
+        <input type="password" id="loginPassword" placeholder="Пароль">
+        <button class="btn-green" onclick="login()">Войти</button>
+        
+        <p id="authMessage"></p>
+    </div>
+
+    <!-- БЛОК ПАНЕЛИ ПОЛЬЗОВАТЕЛЯ -->
+    <div id="dashboardContainer" class="card hidden">
+        <div class="user-info">
+            <span id="welcomeText"></span>
+            <button onclick="logout()" style="background: #dc3545; width: auto; padding: 5px 10px; float: right;">Выйти</button>
+            <div style="clear: both;"></div>
+        </div>
+
+        <!-- Форма учителя (выставление оценок по ID) -->
+        <div id="teacherSection" class="hidden" style="margin-top: 20px; border-top: 1px solid #ddd; padding-top: 15px;">
+            <h3>Выставить оценку</h3>
+            
+            <label>Ученик:</label>
+            <select id="studentSelect">
+                <option value="">Загрузка учеников...</option>
+            </select>
+
+            <label>Предмет:</label>
+            <select id="subjectSelect">
+                <option value="">Загрузка предметов...</option>
+            </select>
+
+            <label>Оценка (число):</label>
+            <input type="number" id="gradeValue" placeholder="5">
+
+            <button class="btn-green" onclick="addGrade()">Сохранить оценку в БД</button>
+            <p id="gradeMessage"></p>
+        </div>
+    </div>
+
+    <!-- БЛОК СПРАВОЧНИКОВ (для теста: добавить класс или предмет) -->
+    <div class="card">
+        <h3>Управление справочниками (Админ-функции)</h3>
+        <input type="text" id="newClassName" placeholder="Название класса (например, 10-А)">
+        <button onclick="addClass()">Добавить класс</button>
+
+        <input type="text" id="newSubjectName" placeholder="Название предмета (например, Математика)" style="margin-top: 15px;">
+        <button onclick="addSubject()">Добавить предмет</button>
+        <p id="dirMessage"></p>
+    </div>
+
+    <!-- БЛОК ПРОСМОТРА ОЦЕНОК -->
+    <div class="card">
+        <h2>Журнал оценок</h2>
+        <button onclick="loadGrades()" style="width: auto; padding: 6px 12px;">Обновить список</button>
+        <ul id="gradesList"></ul>
+    </div>
+
+    <script>
+        let authToken = localStorage.getItem('token') || '';
+        let userRole = localStorage.getItem('role') || '';
+        let userName = localStorage.getItem('username') || '';
+
+        function checkAuth() {
+            if (authToken) {
+                document.getElementById('authContainer').classList.add('hidden');
+                document.getElementById('dashboardContainer').classList.remove('hidden');
+                document.getElementById('welcomeText').innerHTML = `Вы вошли: <b>${userName}</b> (${userRole})`;
+
+                if (userRole === 'teacher') {
+                    document.getElementById('teacherSection').classList.remove('hidden');
+                    loadStudentsForTeacher();
+                    loadSubjectsForTeacher();
+                } else {
+                    document.getElementById('teacherSection').classList.add('hidden');
+                }
+            } else {
+                document.getElementById('authContainer').classList.remove('hidden');
+                document.getElementById('dashboardContainer').classList.add('hidden');
+            }
+        }
+
+        // Показывать выбор класса при регистрации, если это ученик
+        function toggleRegClass() {
+            const role = document.getElementById('regRole').value;
+            const classSelect = document.getElementById('regClassId');
+            if (role === 'student') {
+                classSelect.classList.remove('hidden');
+                loadClassesForReg();
+            } else {
+                classSelect.classList.add('hidden');
+            }
+        }
+
+        async function loadClassesForReg() {
+            try {
+                const res = await fetch('/api/classes');
+                const classes = await res.json();
+                const select = document.getElementById('regClassId');
+                select.innerHTML = '<option value="">Выберите класс...</option>';
+                classes.forEach(c => {
+                    select.innerHTML += `<option value="${c.id}">${c.name}</option>`;
+                });
+            } catch (err) { console.error(err); }
+        }
+
+        async function register() {
+            const username = document.getElementById('regUsername').value;
+            const password = document.getElementById('regPassword').value;
+            const role = document.getElementById('regRole').value;
+            const class_id = document.getElementById('regClassId').value || null;
+            const msg = document.getElementById('authMessage');
+
+            try {
+                const res = await fetch('/api/register', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password, role, class_id })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    msg.className = 'success';
+                    msg.textContent = "Регистрация успешна!";
+                } else {
+                    msg.className = 'error';
+                    msg.textContent = data.error;
+                }
+            } catch (err) { msg.textContent = "Ошибка соединения"; }
+        }
+
+        async function login() {
+            const username = document.getElementById('loginUsername').value;
+            const password = document.getElementById('loginPassword').value;
+            const msg = document.getElementById('authMessage');
+
+            try {
+                const res = await fetch('/api/login', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ username, password })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    authToken = data.token;
+                    userRole = data.role;
+                    userName = username;
+                    localStorage.setItem('token', authToken);
+                    localStorage.setItem('role', userRole);
+                    localStorage.setItem('username', userName);
+                    checkAuth();
+                    loadGrades();
+                } else {
+                    msg.className = 'error';
+                    msg.textContent = data.error;
+                }
+            } catch (err) { msg.textContent = "Ошибка соединения"; }
+        }
+
+        function logout() {
+            localStorage.clear();
+            authToken = ''; userRole = ''; userName = '';
+            checkAuth();
+            loadGrades();
+        }
+
+        // Загрузка списков для учителя
+        async function loadStudentsForTeacher() {
+            try {
+                const res = await fetch('/api/students');
+                const students = await res.json();
+                const select = document.getElementById('studentSelect');
+                select.innerHTML = '';
+                students.forEach(s => {
+                    select.innerHTML += `<option value="${s.id}">${s.username}</option>`;
+                });
+            } catch (err) { console.error(err); }
+        }
+
+        async function loadSubjectsForTeacher() {
+            try {
+                const res = await fetch('/api/subjects');
+                const subjects = await res.json();
+                const select = document.getElementById('subjectSelect');
+                select.innerHTML = '';
+                subjects.forEach(sub => {
+                    select.innerHTML += `<option value="${sub.id}">${sub.name}</option>`;
+                });
+            } catch (err) { console.error(err); }
+        }
+
+        // Добавление класса/предмета через панель управления
+        async function addClass() {
+            const name = document.getElementById('newClassName').value;
+            await fetch('/api/classes', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            alert('Класс добавлен!');
+            loadClassesForReg();
+        }
+
+        async function addSubject() {
+            const name = document.getElementById('newSubjectName').value;
+            await fetch('/api/subjects', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ name })
+            });
+            alert('Предмет добавлен!');
+            loadSubjectsForTeacher();
+        }
+
+        // Загрузка журнала оценок и среднего балла
+        async function loadGrades() {
+            try {
+                const headers = {};
+                if (authToken) {
+                    headers['Authorization'] = `Bearer ${authToken}`;
+                }
+
+                const res = await fetch('/api/grades', { headers });
+                const data = await res.json();
+                
+                const list = document.getElementById('gradesList');
+                list.innerHTML = '';
+
+                if (data.average !== undefined) {
+                    const avgLi = document.createElement('li');
+                    avgLi.innerHTML = `⭐ <b>Ваш средний балл: ${data.average}</b>`;
+                    avgLi.style.marginBottom = '10px';
+                    avgLi.style.fontWeight = 'bold';
+                    avgLi.style.color = '#007bff';
+                    list.appendChild(avgLi);
+                }
+
+                const gradesArray = data.grades || data;
+
+                if (gradesArray.length === 0) {
+                    const li = document.createElement('li');
+                    li.textContent = 'Пока нет оценок';
+                    list.appendChild(li);
+                    return;
+                }
+
+                gradesArray.forEach(item => {
+                    const li = document.createElement('li');
+                    li.style.marginBottom = '8px';
+                    li.style.display = 'flex';
+                    li.style.justifyContent = 'space-between';
+                    li.style.alignItems = 'center';
+
+                    let textSpan = document.createElement('span');
+                    textSpan.textContent = `Ученик: ${item.student} | Предмет: ${item.subject} | Оценка: ${item.grade}`;
+                    li.appendChild(textSpan);
+
+                    if (userRole === 'teacher') {
+                        const deleteBtn = document.createElement('button');
+                        deleteBtn.textContent = 'Удалить';
+                        deleteBtn.style.background = '#dc3545';
+                        deleteBtn.style.width = 'auto';
+                        deleteBtn.style.padding = '4px 8px';
+                        deleteBtn.style.margin = '0 0 0 10px';
+                        deleteBtn.onclick = () => deleteGrade(item.id);
+                        li.appendChild(deleteBtn);
+                    }
+
+                    list.appendChild(li);
+                });
+            } catch (err) { console.error(err); }
+        }
+
+        // Добавление оценки по ID
+        async function addGrade() {
+            const student_id = document.getElementById('studentSelect').value;
+            const subject_id = document.getElementById('subjectSelect').value;
+            const grade = Number(document.getElementById('gradeValue').value);
+            const msg = document.getElementById('gradeMessage');
+
+            try {
+                const res = await fetch('/api/grades', {
+                    method: 'POST',
+                    headers: {
+                        'Content-Type': 'application/json',
+                        'Authorization': `Bearer ${authToken}`
+                    },
+                    body: JSON.stringify({ student_id, subject_id, grade })
+                });
+                const data = await res.json();
+                if (res.ok) {
+                    msg.className = 'success';
+                    msg.textContent = data.message;
+                    loadGrades();
+                } else {
+                    msg.className = 'error';
+                    msg.textContent = data.error;
+                }
+            } catch (err) { msg.textContent = "Ошибка соединения"; }
+        }
+
+        // Удаление оценки
+        async function deleteGrade(id) {
+            if (!confirm('Вы уверены, что хотите удалить эту оценку?')) return;
+
+            try {
+                const res = await fetch(`/api/grades/${id}`, {
+                    method: 'DELETE',
+                    headers: {
+                        'Authorization': `Bearer ${authToken}`
+                    }
+                });
+                const data = await res.json();
+
+                if (res.ok) {
+                    loadGrades();
+                } else {
+                    alert(data.error);
+                }
+            } catch (err) {
+                alert('Ошибка при удалении');
+            }
+        }
+
+        checkAuth();
+        loadGrades();
+    </script>
+</body>
+</html>
