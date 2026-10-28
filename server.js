@@ -2,26 +2,21 @@ const express = require('express');
 const sqlite3 = require('sqlite3').verbose();
 const bcrypt = require('bcrypt');
 const jwt = require('jsonwebtoken');
-const path = require('path');
 
 const app = express();
-const PORT = 3000;
-const SECRET_KEY = "super-secret-key-school";
+const PORT = process.env.PORT || 3000;
+const SECRET_KEY = 'super_secret_school_key';
 
 app.use(express.json());
+app.use(express.static('.'));
 
-// Отдаем главную страницу
-app.get('/', (req, res) => {
-    res.sendFile(path.join(__dirname, 'index.html'));
-});
-
-// Подключаемся к базе данных
+// Подключение к базе данных SQLite
 const db = new sqlite3.Database('./school.db', (err) => {
-    if (err) console.error('Ошибка БД:', err.message);
-    else console.log('Реляционная база данных подключена.');
+    if (err) console.error('Ошибка подключения к БД:', err.message);
+    else console.log('Подключено к базе данных SQLite.');
 });
 
-// Создаем связанные таблицы
+// Создание таблиц (включая расписание и посещаемость)
 db.serialize(() => {
     db.run(`
         CREATE TABLE IF NOT EXISTS classes (
@@ -58,59 +53,63 @@ db.serialize(() => {
             FOREIGN KEY (subject_id) REFERENCES subjects(id)
         )
     `);
+
+    db.run(`
+        CREATE TABLE IF NOT EXISTS schedule (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            class_id INTEGER NOT NULL,
+            subject_id INTEGER NOT NULL,
+            day_of_week TEXT NOT NULL,
+            lesson_time TEXT NOT NULL,
+            FOREIGN KEY (class_id) REFERENCES classes(id),
+            FOREIGN KEY (subject_id) REFERENCES subjects(id)
+        )
+    `);
+
+    db.run(`
+        CREATE TABLE IF NOT EXISTS attendance (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            student_id INTEGER NOT NULL,
+            schedule_id INTEGER NOT NULL,
+            date TEXT NOT NULL,
+            status TEXT NOT NULL,
+            FOREIGN KEY (student_id) REFERENCES users(id),
+            FOREIGN KEY (schedule_id) REFERENCES schedule(id)
+        )
+    `);
 });
 
-// --- АВТОРИЗАЦИЯ И РЕГИСТРАЦИЯ ---
+// Middleware для проверки JWT и прав учителя
+function verifyTeacherToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader) return res.status(401).json({ error: "Нет токена авторизации" });
 
-app.post('/api/register', async (req, res) => {
-    const { username, password, role, class_id } = req.body;
-
-    if (!username || !password || !role) {
-        return res.status(400).json({ error: "Заполните обязательные поля!" });
-    }
-
-    try {
-        const hashedPassword = await bcrypt.hash(password, 10);
-        const sql = `INSERT INTO users (username, password, role, class_id) VALUES (?, ?, ?, ?)`;
-        
-        db.run(sql, [username, hashedPassword, role, class_id || null], function(err) {
-            if (err) {
-                return res.status(400).json({ error: "Такое имя пользователя уже занято!" });
-            }
-            res.status(201).json({ message: "Регистрация успешна!" });
-        });
-    } catch (err) {
-        res.status(500).json({ error: "Ошибка сервера" });
-    }
-});
-
-app.post('/api/login', (req, res) => {
-    const { username, password } = req.body;
-
-    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
-        if (err || !user) {
-            return res.status(400).json({ error: "Неверный логин или пароль" });
-        }
-
-        const isPasswordValid = await bcrypt.compare(password, user.password);
-        if (!isPasswordValid) {
-            return res.status(400).json({ error: "Неверный логин или пароль" });
-        }
-
-        const token = jwt.sign(
-            { id: user.id, username: user.username, role: user.role, class_id: user.class_id }, 
-            SECRET_KEY, 
-            { expiresIn: '1h' }
-        );
-
-        res.json({ message: "Успешный вход!", token, role: user.role });
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, SECRET_KEY, (err, user) => {
+        if (err) return res.status(403).json({ error: "Неверный или просроченный токен" });
+        if (user.role !== 'teacher') return res.status(403).json({ error: "Доступ разрешен только учителям" });
+        req.user = user;
+        next();
     });
-});
+}
+
+// Middleware для общей проверки JWT
+function verifyToken(req, res, next) {
+    const authHeader = req.headers['authorization'];
+    if (!authHeader) return res.status(401).json({ error: "Нет токена авторизации" });
+
+    const token = authHeader.split(' ')[1];
+    jwt.verify(token, SECRET_KEY, (err, user) => {
+        if (err) return res.status(403).json({ error: "Неверный или просроченный токен" });
+        req.user = user;
+        next();
+    });
+}
 
 // --- СПРАВОЧНИКИ (Классы и Предметы) ---
 
 app.get('/api/classes', (req, res) => {
-    db.all("SELECT * FROM classes", [], (err, rows) => {
+    db.all(`SELECT * FROM classes`, [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
@@ -118,14 +117,16 @@ app.get('/api/classes', (req, res) => {
 
 app.post('/api/classes', (req, res) => {
     const { name } = req.body;
-    db.run("INSERT INTO classes (name) VALUES (?)", [name], function(err) {
-        if (err) return res.status(400).json({ error: "Класс уже существует" });
-        res.status(201).json({ id: this.lastID, name });
+    if (!name) return res.status(400).json({ error: "Укажите название класса" });
+
+    db.run(`INSERT INTO classes (name) VALUES (?)`, [name], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ message: "Класс добавлен", id: this.lastID });
     });
 });
 
 app.get('/api/subjects', (req, res) => {
-    db.all("SELECT * FROM subjects", [], (err, rows) => {
+    db.all(`SELECT * FROM subjects`, [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
@@ -133,121 +134,174 @@ app.get('/api/subjects', (req, res) => {
 
 app.post('/api/subjects', (req, res) => {
     const { name } = req.body;
-    db.run("INSERT INTO subjects (name) VALUES (?)", [name], function(err) {
-        if (err) return res.status(400).json({ error: "Предмет уже существует" });
-        res.status(201).json({ id: this.lastID, name });
-    });
-});
+    if (!name) return res.status(400).json({ error: "Укажите название предмета" });
 
-// --- РАБОТА С ОЦЕНКАМИ ---
-
-// Получить оценки с учетом роли
-app.get('/api/grades', (req, res) => {
-    const authHeader = req.headers['authorization'];
-    
-    let tokenUser = null;
-    if (authHeader) {
-        const token = authHeader.split(' ')[1];
-        try {
-            tokenUser = jwt.verify(token, SECRET_KEY);
-        } catch (e) {}
-    }
-
-    let sql = `
-        SELECT grades.id, users.username AS student, subjects.name AS subject, grades.grade, grades.student_id 
-        FROM grades
-        JOIN users ON grades.student_id = users.id
-        JOIN subjects ON grades.subject_id = subjects.id
-    `;
-
-    if (tokenUser && tokenUser.role === 'student') {
-        sql += ` WHERE grades.student_id = ?`;
-        db.all(sql, [tokenUser.id], (err, rows) => {
-            if (err) return res.status(500).json({ error: err.message });
-            
-            // Считаем средний балл ученика
-            let average = 0;
-            if (rows.length > 0) {
-                const sum = rows.reduce((acc, curr) => acc + curr.grade, 0);
-                average = (sum / rows.length).toFixed(2);
-            }
-
-            res.json({ grades: rows, average });
-        });
-    } else {
-        db.all(sql, [], (err, rows) => {
-            if (err) return res.status(500).json({ error: err.message });
-            res.json({ grades: rows });
-        });
-    }
-});
-
-// Middleware проверки токена учителя
-const verifyTeacherToken = (req, res, next) => {
-    const authHeader = req.headers['authorization'];
-    if (!authHeader) return res.status(401).json({ error: "Нет токена авторизации" });
-
-    const token = authHeader.split(' ')[1];
-    jwt.verify(token, SECRET_KEY, (err, decoded) => {
-        if (err || decoded.role !== 'teacher') {
-            return res.status(403).json({ error: "Доступ запрещен!" });
-        }
-        req.user = decoded;
-        next();
-    });
-};
-
-// Добавить оценку (только учитель)
-app.post('/api/grades', verifyTeacherToken, (req, res) => {
-    const { student_id, subject_id, grade } = req.body;
-
-    if (!student_id || !subject_id || !grade) {
-        return res.status(400).json({ error: "Заполните все поля!" });
-    }
-
-    const sql = `INSERT INTO grades (student_id, subject_id, grade) VALUES (?, ?, ?)`;
-    db.run(sql, [student_id, subject_id, grade], function(err) {
+    db.run(`INSERT INTO subjects (name) VALUES (?)`, [name], function(err) {
         if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: "Оценка успешно добавлена!" });
+        res.json({ message: "Предмет добавлен", id: this.lastID });
     });
 });
-// Добавить оценку (только учитель)
-app.post('/api/grades', verifyTeacherToken, (req, res) => {
-    const { student_id, subject_id, grade } = req.body;
 
-    if (!student_id || !subject_id || !grade) {
-        return res.status(400).json({ error: "Заполните все поля!" });
-    }
-
-    const sql = `INSERT INTO grades (student_id, subject_id, grade) VALUES (?, ?, ?)`;
-    db.run(sql, [student_id, subject_id, grade], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        res.json({ message: "Оценка успешно добавлена!" });
-    });
-});
-// Удалить оценку по ID (только для учителя)
-app.delete('/api/grades/:id', verifyTeacherToken, (req, res) => {
-    const gradeId = req.params.id;
-
-    const sql = `DELETE FROM grades WHERE id = ?`;
-    db.run(sql, [gradeId], function(err) {
-        if (err) return res.status(500).json({ error: err.message });
-        
-        if (this.changes === 0) {
-            return res.status(404).json({ error: "Оценка не найдена" });
-        }
-
-        res.json({ message: "Оценка успешно удалена!" });
-    });
-});
-// Список учеников для выбора учителем
+// Получить список учеников
 app.get('/api/students', (req, res) => {
-    db.all("SELECT id, username FROM users WHERE role = 'student'", [], (err, rows) => {
+    db.all(`SELECT id, username FROM users WHERE role = 'student'`, [], (err, rows) => {
         if (err) return res.status(500).json({ error: err.message });
         res.json(rows);
     });
 });
 
+// --- АВТОРИЗАЦИЯ И РЕГИСТРАЦИЯ ---
+
+app.post('/api/register', async (req, res) => {
+    const { username, password, role, class_id } = req.body;
+    if (!username || !password || !role) {
+        return res.status(400).json({ error: "Заполните все обязательные поля" });
+    }
+
+    try {
+        const hashedPassword = await bcrypt.hash(password, 10);
+        const sql = `INSERT INTO users (username, password, role, class_id) VALUES (?, ?, ?, ?)`;
+        db.run(sql, [username, hashedPassword, role, class_id || null], function(err) {
+            if (err) return res.status(400).json({ error: "Пользователь уже существует или ошибка БД" });
+            res.json({ message: "Регистрация успешна!" });
+        });
+    } catch (err) {
+        res.status(500).json({ error: "Ошибка сервера при хэшировании" });
+    }
+});
+
+app.post('/api/login', (req, res) => {
+    const { username, password } = req.body;
+    if (!username || !password) {
+        return res.status(400).json({ error: "Введите логин и пароль" });
+    }
+
+    db.get(`SELECT * FROM users WHERE username = ?`, [username], async (err, user) => {
+        if (err) return res.status(500).json({ error: err.message });
+        if (!user) return res.status(400).json({ error: "Неверный логин или пароль" });
+
+        const match = await bcrypt.compare(password, user.password);
+        if (!match) return res.status(400).json({ error: "Неверный логин или пароль" });
+
+        const token = jwt.sign({ id: user.id, username: user.username, role: user.role }, SECRET_KEY, { expiresIn: '24h' });
+        res.json({ token, role: user.role, username: user.username });
+    });
+});
+
+// --- ОЦЕНКИ ---
+
+app.get('/api/grades', verifyToken, (req, res) => {
+    if (req.user.role === 'teacher') {
+        const sql = `
+            SELECT grades.id, users.username AS student, subjects.name AS subject, grades.grade
+            FROM grades
+            JOIN users ON grades.student_id = users.id
+            JOIN subjects ON grades.subject_id = subjects.id
+        `;
+        db.all(sql, [], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            res.json(rows);
+        });
+    } else {
+        const sql = `
+            SELECT grades.id, subjects.name AS subject, grades.grade
+            FROM grades
+            JOIN subjects ON grades.subject_id = subjects.id
+            WHERE grades.student_id = ?
+        `;
+        db.all(sql, [req.user.id], (err, rows) => {
+            if (err) return res.status(500).json({ error: err.message });
+            
+            let avg = 0;
+            if (rows.length > 0) {
+                const sum = rows.reduce((acc, curr) => acc + curr.grade, 0);
+                avg = (sum / rows.length).toFixed(2);
+            }
+            res.json({ grades: rows, average: avg });
+        });
+    }
+});
+
+app.post('/api/grades', verifyTeacherToken, (req, res) => {
+    const { student_id, subject_id, grade } = req.body;
+    if (!student_id || !subject_id || !grade) {
+        return res.status(400).json({ error: "Заполните все поля!" });
+    }
+
+    const sql = `INSERT INTO grades (student_id, subject_id, grade) VALUES (?, ?, ?)`;
+    db.run(sql, [student_id, subject_id, grade], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ message: "Оценка успешно добавлена!" });
+    });
+});
+
+app.delete('/api/grades/:id', verifyTeacherToken, (req, res) => {
+    const gradeId = req.params.id;
+    const sql = `DELETE FROM grades WHERE id = ?`;
+    db.run(sql, [gradeId], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        if (this.changes === 0) return res.status(404).json({ error: "Оценка не найдена" });
+        res.json({ message: "Оценка успешно удалена!" });
+    });
+});
+
+// --- РАСПИСАНИЕ И ПОСЕЩАЕМОСТЬ ---
+
+app.get('/api/schedule', (req, res) => {
+    let sql = `
+        SELECT schedule.id, classes.name AS class_name, subjects.name AS subject_name, schedule.day_of_week, schedule.lesson_time
+        FROM schedule
+        JOIN classes ON schedule.class_id = classes.id
+        JOIN subjects ON schedule.subject_id = subjects.id
+    `;
+    db.all(sql, [], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+});
+
+app.post('/api/schedule', verifyTeacherToken, (req, res) => {
+    const { class_id, subject_id, day_of_week, lesson_time } = req.body;
+    if (!class_id || !subject_id || !day_of_week || !lesson_time) {
+        return res.status(400).json({ error: "Заполните все поля расписания!" });
+    }
+
+    const sql = `INSERT INTO schedule (class_id, subject_id, day_of_week, lesson_time) VALUES (?, ?, ?, ?)`;
+    db.run(sql, [class_id, subject_id, day_of_week, lesson_time], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ message: "Урок успешно добавлен в расписание!" });
+    });
+});
+
+app.post('/api/attendance', verifyTeacherToken, (req, res) => {
+    const { student_id, schedule_id, date, status } = req.body;
+    if (!student_id || !schedule_id || !date || !status) {
+        return res.status(400).json({ error: "Заполните все данные посещаемости!" });
+    }
+
+    const sql = `INSERT INTO attendance (student_id, schedule_id, date, status) VALUES (?, ?, ?, ?)`;
+    db.run(sql, [student_id, schedule_id, date, status], function(err) {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json({ message: "Посещаемость успешно сохранена!" });
+    });
+});
+
+app.get('/api/attendance/:student_id', (req, res) => {
+    const studentId = req.params.student_id;
+    const sql = `
+        SELECT attendance.date, subjects.name AS subject, schedule.lesson_time, attendance.status
+        FROM attendance
+        JOIN schedule ON attendance.schedule_id = schedule.id
+        JOIN subjects ON schedule.subject_id = subjects.id
+        WHERE attendance.student_id = ?
+    `;
+    db.all(sql, [studentId], (err, rows) => {
+        if (err) return res.status(500).json({ error: err.message });
+        res.json(rows);
+    });
+});
+
+// Запуск сервера
 app.listen(PORT, () => {
-    console.log(`Сервер запущен и работает: http://localhost:${PORT}`);
+    console.log(`Сервер запущен на порту ${PORT}`);
 });
